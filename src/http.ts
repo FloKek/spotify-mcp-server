@@ -15,12 +15,37 @@ import {
   type McpServerFactory,
 } from '@modelcontextprotocol/server';
 
+import { timingSafeEqual } from 'node:crypto';
+
 export interface HttpOptions {
   host: string;
   port: number;
 }
 
 type Guard = (req: IncomingMessage, res: ServerResponse) => boolean;
+
+function apiKeyGuard(expected: string): Guard {
+  const expectedBytes = Buffer.from(expected, 'utf8');
+
+  return (req, res) => {
+    const supplied = req.headers['x-api-key'];
+    if (typeof supplied !== 'string') {
+      res.writeHead(401).end('Unauthorized');
+      return false;
+    }
+
+    const suppliedBytes = Buffer.from(supplied, 'utf8');
+    if (
+      suppliedBytes.length !== expectedBytes.length ||
+      !timingSafeEqual(suppliedBytes, expectedBytes)
+    ) {
+      res.writeHead(401).end('Unauthorized');
+      return false;
+    }
+
+    return true;
+  };
+}
 
 export function httpOptionsFromEnv(
   env: NodeJS.ProcessEnv = process.env,
@@ -68,7 +93,9 @@ export async function serveHttp(
   const handle = toNodeHandler(createMcpHandler(factory, { onerror }), {
     onerror,
   });
-  let guards: Guard[] = [];
+  const apiKey = process.env.MCP_API_KEY;
+if (!apiKey) throw new Error('MCP_API_KEY must be set when MCP_TRANSPORT=http');
+let guards: Guard[] = [apiKeyGuard(apiKey)];
 
   const server = createHttpServer((req, res) => {
     if (!guards.every((guard) => guard(req, res))) return;
@@ -87,7 +114,7 @@ export async function serveHttp(
   server.once('listening', () => {
     const bound = server.address();
     if (typeof bound === 'object' && bound && isLoopbackAddress(bound.address))
-      guards = loopbackGuards(host, bound.address);
+      guards = [...guards, ...loopbackGuards(host, bound.address)];
   });
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
